@@ -1,0 +1,6 @@
+[
+    {
+        "caption": "GitTools: Browse",
+        "command": "git_browse"
+    },
+]

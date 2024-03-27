@@ -1,21 +1,28 @@
-import base64
-from re import sub
-from sre_compile import BRANCH
+import logging
 import subprocess
 import webbrowser
-from os.path import relpath
-from os.path import isdir
 from os.path import dirname
+from os.path import isdir
+from os.path import relpath
+from sys import stdout
+from typing import Any
+from typing import Dict
 from typing import Optional
-from typing import Tuple
-
-from .plugin.logger import get_logger
 
 import sublime
 import sublime_plugin
 
+
+def get_logger(level: int = logging.INFO) -> logging.Logger:
+    logging.basicConfig(
+        level=level,
+        format="[%(name)s:%(levelname)s] [%(filename)s:%(lineno)d]: %(message)s",
+        handlers=[logging.StreamHandler(stdout)],
+    )
+    return logging.getLogger("GitTools")
+
+
 # Global logger
-# TODO: maybe just initialize this here
 log = get_logger()
 
 
@@ -35,11 +42,9 @@ class RowRange:
         self.end = end
 
 
-
 # git ls-remote --exit-code --symref remote HEAD
 # git -C path config remote.origin.url
 class GitBrowse(sublime_plugin.WindowCommand):
-    # sublime.status_message
     def run(self) -> None:
         view: Optional[sublime.View] = self.window.active_view()
         if view is None or not view.is_valid() or view.is_loading():
@@ -79,7 +84,8 @@ def removesuffix(base: str, suffix: str) -> str:
     return base
 
 
-def convert_remote_url(u: str) -> str:
+# TODO: load replacements from settings
+def convert_remote_url(u: str, replacements: Optional[Dict[str, str]] = None) -> str:
     if u.startswith("https://github.com"):
         return u
     elif u.startswith("git@github.com"):
@@ -92,6 +98,10 @@ def convert_remote_url(u: str) -> str:
         return u.replace(
             "https://go.googlesource.com/", "https://github.com/golang/", 1
         )
+    if replacements:
+        for k, v in replacements.items():
+            if u.startswith(k):
+                return u.replace(k, v, 1)
     raise UnsupportedURIException(u)
 
 
@@ -104,6 +114,7 @@ def view_row(view: sublime.View, point: int) -> int:
 
 
 def view_selection_rows(view: sublime.View) -> Optional[RowRange]:
+    # Use the first selection, if any.
     try:
         sel = view.sel()
         if sel and len(sel) >= 1:
@@ -116,21 +127,30 @@ def view_selection_rows(view: sublime.View) -> Optional[RowRange]:
         log.exception("index error: %s", e)
     except Exception as e:
         log.exception("calculating offset: {}".format(e))
-    return
-
-
-# def open_in_browser(uri: str) -> None:
-#     # NOTE: Remove this check when on py3.8.
-#     if not uri.lower().startswith(("http://", "https://")):
-#         uri = "https://" + uri
-#     if not webbrowser.open(uri):
-#         sublime.status_message("failed to open: " + uri)
+    return None
 
 
 def _git(path: str, *cmd: str) -> str:
     if not isdir(path):
         path = dirname(path)
-    return subprocess.check_output(("git", "-C", path, *cmd)).decode().strip()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", path, *cmd],
+            capture_output=True,
+            check=True,
+            timeout=5,
+            encoding="utf-8",
+        )
+        if proc.stdout:
+            return proc.stdout.strip()
+        else:
+            return ""
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode().strip() if e.stderr else "<NONE>"
+        log.exception(
+            "command %s exited with %d stderr:\n%s", e.cmd, e.returncode, stderr
+        )
+        raise e
 
 
 def git_top_level(path: str) -> str:
@@ -149,16 +169,46 @@ def git_branch(path: str) -> str:
         return git_commit_sha(path)
 
 
-def git_remote(path: str, branch: Optional[str] = None) -> str:
+PREFERRED_BRANCHES = [
+    "master",
+    "main",
+    "remotes/origin/master",
+    "remotes/origin/main",
+]
+
+
+def git_commit_branch(path: str, commit: str) -> Optional[str]:
     try:
-        # Check if the branch has a different remote than origin
-        branch = git_branch(path)
-        remote = _git(path, "config", f"branch.{branch}.remote")
-        if remote != "origin":
-            return remote
+        branches = _git(
+            path, "branch", "--all", "--no-color", "--contains", commit
+        ).splitlines()
+        if not branches:
+            return None
     except subprocess.CalledProcessError:
-        pass
-    return _git(path, "config", "remote.origin.url")
+        return None
+
+    # Try to find the current branch. Since this function should only
+    # be used when we're in a detached state this should fail.
+    for b in branches:
+        if b.startswith("* ") and not "HEAD detached at" in b:
+            return removeprefix(b, "* ")
+
+    # Try to find a preferred branch that contains the commit.
+    branches = [b.strip() for b in branches]
+    for b in PREFERRED_BRANCHES:
+        if b in branches:
+            return b
+
+    # Try to find a branch with a remote URL
+    for b in sorted(branches):
+        try:
+            remote = _git(path, "config", f"branch.{b}.remote")
+            if _git(path, "config", f"remote.{remote}.url"):
+                return b
+        except subprocess.CalledProcessError:
+            pass
+
+    return None
 
 
 def repo_relpath(path: str) -> str:

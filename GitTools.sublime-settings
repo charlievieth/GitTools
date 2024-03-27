@@ -1,0 +1,7 @@
+{
+	// TODO: Implement this logic
+	// Replace URLs matching key with value
+	"replacement_urls": {
+		"https://go.googlesource.com/", "https://github.com/golang/",
+	}
+}

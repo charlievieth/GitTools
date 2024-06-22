@@ -5,7 +5,6 @@ from os.path import dirname
 from os.path import isdir
 from os.path import relpath
 from sys import stdout
-from typing import Any
 from typing import Dict
 from typing import Optional
 
@@ -65,7 +64,7 @@ class GitBrowse(sublime_plugin.WindowCommand):
             return
         file_name = view.file_name()
         if file_name is None:
-            sublime.status_message(f"error: GitBrowse: file not saved to disk")
+            sublime.status_message("error: GitBrowse: file not saved to disk")
             return
         row_range = view_selection_rows(view)
         if not row_range:
@@ -74,10 +73,11 @@ class GitBrowse(sublime_plugin.WindowCommand):
         branch = git_branch(file_name)
         remote = git_branch_remote_url(file_name, branch)
         if not remote:
-            branch = git_commit_branch(file_name, branch)
-            if not branch:
+            resolved_branch = git_commit_branch(file_name, branch)
+            if not resolved_branch:
                 log.info("failed to find a branch for commit %s", branch)
                 return
+            branch = resolved_branch
             remote = git_branch_remote_url(file_name, branch)
             if not remote:
                 log.info("failed to find a remote for commit %s", branch)
@@ -87,11 +87,7 @@ class GitBrowse(sublime_plugin.WindowCommand):
         rel = repo_relpath(file_name)
         log.info("relpath: %s branch: %s base_url: %s", rel, branch, base_url)
         url = f"{base_url}/blob/{branch}/{rel}#L{row_range.begin}-L{row_range.end}"
-        open_url(view, url)
-        pass
-
-    def repo_url(self, repo: str) -> str:
-        return ""
+        webbrowser.open(url)
 
 
 def removeprefix(base: str, prefix: str) -> str:
@@ -116,13 +112,13 @@ def format_url(host_url: str, row_range: Optional[RowRange]) -> str:
 def convert_remote_url(u: str, replacements: Optional[Dict[str, str]] = None) -> str:
     if u.startswith("https://github.com"):
         return u
-    elif u.startswith("git@github.com"):
+    if u.startswith("git@github.com"):
         u = removeprefix(u, "git@")
         u = removesuffix(u, ".git")
         u = u.replace(":", "/", 1)
         return "https://" + u
     # TODO: make this configurable
-    elif u.startswith("https://go.googlesource.com/"):
+    if u.startswith("https://go.googlesource.com/"):
         return u.replace(
             "https://go.googlesource.com/", "https://github.com/golang/", 1
         )
@@ -131,10 +127,6 @@ def convert_remote_url(u: str, replacements: Optional[Dict[str, str]] = None) ->
             if u.startswith(k):
                 return u.replace(k, v, 1)
     raise UnsupportedURIException(u)
-
-
-def open_url(view: sublime.View, url: str) -> None:
-    webbrowser.open(url)
 
 
 def view_row(view: sublime.View, point: int) -> int:

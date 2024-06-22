@@ -12,6 +12,13 @@ from typing import Optional
 import sublime
 import sublime_plugin
 
+PREFERRED_BRANCHES = [
+    "master",
+    "main",
+    "remotes/origin/master",
+    "remotes/origin/main",
+]
+
 
 def get_logger(level: int = logging.INFO) -> logging.Logger:
     logging.basicConfig(
@@ -34,6 +41,14 @@ class UnsupportedURIException(Exception):
         return f"unsupported remote URI: {self.uri}"
 
 
+class UnsupportedHostException(Exception):
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
+
+    def __str__(self) -> str:
+        return f"unsupported remote host: {self.uri}"
+
+
 class RowRange:
     __slots__ = "begin", "end"
 
@@ -42,8 +57,7 @@ class RowRange:
         self.end = end
 
 
-# git ls-remote --exit-code --symref remote HEAD
-# git -C path config remote.origin.url
+# TODO: fallback to the commit if we can't find a branch
 class GitBrowse(sublime_plugin.WindowCommand):
     def run(self) -> None:
         view: Optional[sublime.View] = self.window.active_view()
@@ -57,12 +71,20 @@ class GitBrowse(sublime_plugin.WindowCommand):
         if not row_range:
             return
 
-        # TODO: try with BRANCH then SHA
-        rel = repo_relpath(file_name)
         branch = git_branch(file_name)
-        if branch.startswith("tags/"):
-            branch = removeprefix(branch, "tags/")
-        base_url = convert_remote_url(git_remote(file_name, branch))
+        remote = git_branch_remote_url(file_name, branch)
+        if not remote:
+            branch = git_commit_branch(file_name, branch)
+            if not branch:
+                log.info("failed to find a branch for commit %s", branch)
+                return
+            remote = git_branch_remote_url(file_name, branch)
+            if not remote:
+                log.info("failed to find a remote for commit %s", branch)
+                return
+
+        base_url = convert_remote_url(remote)
+        rel = repo_relpath(file_name)
         log.info("relpath: %s branch: %s base_url: %s", rel, branch, base_url)
         url = f"{base_url}/blob/{branch}/{rel}#L{row_range.begin}-L{row_range.end}"
         open_url(view, url)
@@ -82,6 +104,12 @@ def removesuffix(base: str, suffix: str) -> str:
     if base.endswith(suffix):
         return base[: len(base) - len(suffix)]
     return base
+
+
+def format_url(host_url: str, row_range: Optional[RowRange]) -> str:
+    if "github.com" not in host_url:
+        raise UnsupportedHostException(host_url)
+    return ""
 
 
 # TODO: load replacements from settings
@@ -123,10 +151,10 @@ def view_selection_rows(view: sublime.View) -> Optional[RowRange]:
                 end=view.rowcol(sel[0].end())[0] + 1,
             )
     except IndexError as e:
-        # This happens when the file is closed before this can run
+        # 'This happens when the file is closed before this can run
         log.exception("index error: %s", e)
     except Exception as e:
-        log.exception("calculating offset: {}".format(e))
+        log.exception("calculating offset: %s", e)
     return None
 
 
@@ -163,21 +191,16 @@ def git_commit_sha(path: str) -> str:
 
 def git_branch(path: str) -> str:
     branch = _git(path, "name-rev", "--name-only", "HEAD")
-    if branch != "HEAD":
+    if branch != "HEAD" and not branch.startswith("tags/"):
         return branch
     else:
         return git_commit_sha(path)
 
 
-PREFERRED_BRANCHES = [
-    "master",
-    "main",
-    "remotes/origin/master",
-    "remotes/origin/main",
-]
-
-
+# WARN: this should probably only be used if we're in a detached state.
+# git_commit_branch returns the branch that a git commit belongs.
 def git_commit_branch(path: str, commit: str) -> Optional[str]:
+    # branch --all --no-color --contains
     try:
         branches = _git(
             path, "branch", "--all", "--no-color", "--contains", commit
@@ -190,7 +213,7 @@ def git_commit_branch(path: str, commit: str) -> Optional[str]:
     # Try to find the current branch. Since this function should only
     # be used when we're in a detached state this should fail.
     for b in branches:
-        if b.startswith("* ") and not "HEAD detached at" in b:
+        if b.startswith("* ") and "HEAD detached at" not in b:
             return removeprefix(b, "* ")
 
     # Try to find a preferred branch that contains the commit.
@@ -209,6 +232,23 @@ def git_commit_branch(path: str, commit: str) -> Optional[str]:
             pass
 
     return None
+
+
+# WARN: use or remove
+def git_branch_remote_url(path: str, branch: str) -> Optional[str]:
+    try:
+        remote = _git(path, "config", f"branch.{branch}.remote")
+        if remote:
+            return _git(path, "config", f"remote.{remote}.url")
+        else:
+            return ""
+    except subprocess.CalledProcessError:
+        return None
+
+
+# WARN: use or remove
+def git_remote_url(path: str, remote: str) -> str:
+    return _git(path, "config", f"remote.{remote}.url")
 
 
 def repo_relpath(path: str) -> str:

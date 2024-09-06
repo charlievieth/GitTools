@@ -5,7 +5,9 @@ from os.path import dirname
 from os.path import isdir
 from os.path import relpath
 from sys import stdout
+from typing import Any
 from typing import Dict
+from typing import List
 from typing import Optional
 
 import sublime
@@ -58,7 +60,7 @@ class RowRange:
 
 # TODO: fallback to the commit if we can't find a branch
 class GitBrowse(sublime_plugin.WindowCommand):
-    def run(self) -> None:
+    def run(self, **kwargs: Dict[str, Any]) -> None:
         view: Optional[sublime.View] = self.window.active_view()
         if view is None or not view.is_valid() or view.is_loading():
             return
@@ -67,9 +69,8 @@ class GitBrowse(sublime_plugin.WindowCommand):
             sublime.status_message("error: GitBrowse: file not saved to disk")
             return
         row_range = view_selection_rows(view)
-        if not row_range:
-            return
 
+        # TODO: check if the remote exists in GitHub
         branch = git_branch(file_name)
         remote = git_branch_remote_url(file_name, branch)
         if not remote:
@@ -86,7 +87,13 @@ class GitBrowse(sublime_plugin.WindowCommand):
         base_url = convert_remote_url(remote)
         rel = repo_relpath(file_name)
         log.info("relpath: %s branch: %s base_url: %s", rel, branch, base_url)
-        url = f"{base_url}/blob/{branch}/{rel}#L{row_range.begin}-L{row_range.end}"
+
+        # WARN: this is GitHub specific
+        url = f"{base_url}/blob/{branch}/{rel}"
+        if row_range:
+            # Add "?plain=1" so that we open the code for things like Markdown
+            # which by default are opened in a "pretty" view.
+            url += f"?plain=1#L{row_range.begin}-L{row_range.end}"
         webbrowser.open(url)
 
 
@@ -138,10 +145,11 @@ def view_selection_rows(view: sublime.View) -> Optional[RowRange]:
     try:
         sel = view.sel()
         if sel and len(sel) >= 1:
-            return RowRange(
-                begin=view.rowcol(sel[0].begin())[0] + 1,
-                end=view.rowcol(sel[0].end())[0] + 1,
-            )
+            begin = view.rowcol(sel[0].begin())
+            end = view.rowcol(sel[0].end())
+            if begin == end:
+                return None  # no selection
+            return RowRange(begin=begin[0] + 1, end=end[0] + 1)
     except IndexError as e:
         # 'This happens when the file is closed before this can run
         log.exception("index error: %s", e)
@@ -178,21 +186,26 @@ def git_top_level(path: str) -> str:
 
 
 def git_commit_sha(path: str) -> str:
-    return _git("rev-parse", "HEAD")
+    return _git(path, "rev-parse", "HEAD")
 
 
 def git_branch(path: str) -> str:
-    branch = _git(path, "name-rev", "--name-only", "HEAD")
-    if branch != "HEAD" and not branch.startswith("tags/"):
-        return branch
-    else:
-        return git_commit_sha(path)
+    try:
+        branch = _git(path, "name-rev", "--name-only", "HEAD")
+        if branch != "HEAD" and not branch.startswith("tags/"):
+            return branch
+    except subprocess.CalledProcessError:
+        pass
+    return git_commit_sha(path)
 
 
 # WARN: this should probably only be used if we're in a detached state.
 # git_commit_branch returns the branch that a git commit belongs.
 def git_commit_branch(path: str, commit: str) -> Optional[str]:
-    # branch --all --no-color --contains
+    # TODO: see if we can use the "/remotes/*" result
+    # Example output:
+    #     * cev/fixes
+    #     remotes/charlievieth/cev/fixes
     try:
         branches = _git(
             path, "branch", "--all", "--no-color", "--contains", commit
@@ -226,21 +239,25 @@ def git_commit_branch(path: str, commit: str) -> Optional[str]:
     return None
 
 
+def git_remotes(path: str) -> List[str]:
+    return _git(path, "remote", "show").splitlines()
+
+
 # WARN: use or remove
 def git_branch_remote_url(path: str, branch: str) -> Optional[str]:
+    remotes = git_remotes(path)
+    if len(remotes) == 1:
+        return _git(path, "config", "get", f"remote.{remotes[0]}.url")
+    # TODO: not all branches have a remote configured
+    # so we need a better way to figure this out.
     try:
-        remote = _git(path, "config", f"branch.{branch}.remote")
+        remote = _git(path, "config", "get", f"branch.{branch}.remote")
         if remote:
-            return _git(path, "config", f"remote.{remote}.url")
+            return _git(path, "config", "get", f"remote.{remote}.url")
         else:
             return ""
     except subprocess.CalledProcessError:
         return None
-
-
-# WARN: use or remove
-def git_remote_url(path: str, remote: str) -> str:
-    return _git(path, "config", f"remote.{remote}.url")
 
 
 def repo_relpath(path: str) -> str:

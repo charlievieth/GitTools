@@ -174,9 +174,14 @@ def _git(path: str, *cmd: str) -> str:
         else:
             return ""
     except subprocess.CalledProcessError as e:
+        stdout = e.stdout.decode().strip() if e.stdout else "<NONE>"
         stderr = e.stderr.decode().strip() if e.stderr else "<NONE>"
-        log.exception(
-            "command %s exited with %d stderr:\n%s", e.cmd, e.returncode, stderr
+        log.warn(
+            "command %s exited with %d\nstdout:\n%s\nstderr:\n%s",
+            e.cmd,
+            e.returncode,
+            stdout,
+            stderr,
         )
         raise e
 
@@ -189,11 +194,37 @@ def git_commit_sha(path: str) -> str:
     return _git(path, "rev-parse", "HEAD")
 
 
+def git_detached_head(path: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", path, "symbolic-ref", "--quiet", "HEAD"],
+            check=True,
+            timeout=5,
+        )
+        return False
+    except subprocess.CalledProcessError:
+        return True
+
+
 def git_branch(path: str) -> str:
     try:
-        branch = _git(path, "name-rev", "--name-only", "HEAD")
-        if branch != "HEAD" and not branch.startswith("tags/"):
+        branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
+        if branch != "HEAD":
             return branch
+        # Check if were detached
+        if git_detached_head(path):
+            return git_commit_sha(path)
+        branch = _git(path, "name-rev", "--name-only", "HEAD")
+        if branch != "HEAD":
+            if branch.startswith("tags/"):
+                return removeprefix(branch, "tags/")
+            elif branch.startswith("remotes/"):
+                if branch.count("/") > 2:
+                    return "/".join(branch.split("/")[2:])
+                else:
+                    return git_commit_sha(path)
+            else:
+                return branch
     except subprocess.CalledProcessError:
         pass
     return git_commit_sha(path)
